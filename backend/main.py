@@ -373,10 +373,35 @@ app = FastAPI(
     description=(
         "Backend foundation for VYOMRA. Includes resource listings, booking lifecycle, "
         "server-side slot conflict checks, and incident tracking. Authentication is not "
-        "implemented in this starter; do not expose it publicly with trusted owner actions enabled."
+        "implemented. Set PUBLIC_DEMO_READ_ONLY=true for a public, non-mutating judge demo; "
+        "never expose writable owner actions without server-side authentication and authorization."
     ),
     version="0.1.0",
 )
+
+# Public judge-demo protection. Keep disabled for local interactive testing.
+# This is a read-only deployment control, NOT authentication or authorization.
+# Do not expose an interactive writable deployment without real identity verification.
+PUBLIC_DEMO_READ_ONLY = os.getenv("PUBLIC_DEMO_READ_ONLY", "false").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
+@app.middleware("http")
+async def protect_public_demo_writes(request, call_next):
+    if PUBLIC_DEMO_READ_ONLY and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        # These POST routes only compute advisory results and do not change records.
+        analysis_routes = {
+            "/api/intelligence/synapse",
+            "/api/intelligence/fairshare-ai",
+        }
+        if request.url.path not in analysis_routes:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "This public judge demo is read-only. Data-changing actions are disabled."},
+            )
+    return await call_next(request)
+
 
 app.add_middleware(
     CORSMiddleware,
