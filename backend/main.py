@@ -4,13 +4,18 @@ import os
 import re
 import json
 import logging
+import base64
+import hashlib
+import hmac
+import secrets
+import time
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from datetime import date, datetime, timezone
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import JSON, DateTime, Integer, String, Text, create_engine, select
@@ -32,6 +37,8 @@ engine_kwargs: dict[str, Any] = {"pool_pre_ping": True}
 if DATABASE_URL.startswith("sqlite"):
     engine_kwargs["connect_args"] = {"check_same_thread": False}
 
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 engine = create_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
@@ -373,7 +380,7 @@ app = FastAPI(
     description=(
         "Backend foundation for VYOMRA. Includes resource listings, booking lifecycle, "
         "server-side slot conflict checks, and incident tracking. Authentication is not "
-        "implemented. Set PUBLIC_DEMO_READ_ONLY=true for a public, non-mutating judge demo; "
+        "available for configured judge identities. Set PUBLIC_DEMO_READ_ONLY=true; "
         "never expose writable owner actions without server-side authentication and authorization."
     ),
     version="0.1.0",
@@ -386,20 +393,118 @@ PUBLIC_DEMO_READ_ONLY = os.getenv("PUBLIC_DEMO_READ_ONLY", "false").strip().lowe
     "1", "true", "yes", "on"
 }
 
+# Judge access uses two independently configured secrets. No secret is shipped to Vercel.
+# Set VYOMRA_AUTH_SECRET (random 64+ hex chars), VYOMRA_OWNER_PIN and
+# VYOMRA_RESEARCHER_PIN on Render. Keep PUBLIC_DEMO_READ_ONLY=true.
+AUTH_SECRET = os.getenv("VYOMRA_AUTH_SECRET", "")
+OWNER_PIN = os.getenv("VYOMRA_OWNER_PIN", "")
+RESEARCHER_PIN = os.getenv("VYOMRA_RESEARCHER_PIN", "")
+DEMO_IDENTITIES = {"Rahul Roy": "owner", "Researcher A": "researcher", "Researcher B": "researcher", "Researcher C": "researcher"}
+
+class DemoLogin(BaseModel):
+    name: Literal["Rahul Roy", "Researcher A", "Researcher B", "Researcher C"]
+    accessCode: str = Field(min_length=8, max_length=256)
+
+def _token(name: str) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": name, "exp": int(time.time()) + 8*3600}, separators=(",", ":")).encode()).decode().rstrip("=")
+    sig = hmac.new(AUTH_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return payload + "." + sig
+
+def _identity(request: Request) -> str | None:
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer ") or not AUTH_SECRET:
+        return None
+    try:
+        payload, signature = auth[7:].split(".", 1)
+        expected = hmac.new(AUTH_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        if data.get("exp", 0) < time.time() or data.get("sub") not in DEMO_IDENTITIES:
+            return None
+        return data["sub"]
+    except (ValueError, TypeError, KeyError):
+        return None
+
+@app.post("/api/demo/login")
+def demo_login(payload: DemoLogin) -> dict[str, str]:
+    if not (len(AUTH_SECRET) >= 32 and len(OWNER_PIN) >= 8 and len(RESEARCHER_PIN) >= 8 and OWNER_PIN != RESEARCHER_PIN):
+        raise HTTPException(503, "Judge access has not been configured on the server")
+    correct = OWNER_PIN if DEMO_IDENTITIES[payload.name] == "owner" else RESEARCHER_PIN
+    if not hmac.compare_digest(payload.accessCode, correct):
+        raise HTTPException(401, "Incorrect demo access code")
+    return {"token": _token(payload.name), "name": payload.name, "role": DEMO_IDENTITIES[payload.name]}
+
 @app.middleware("http")
-async def protect_public_demo_writes(request, call_next):
-    if PUBLIC_DEMO_READ_ONLY and request.method not in {"GET", "HEAD", "OPTIONS"}:
-        # These POST routes only compute advisory results and do not change records.
-        analysis_routes = {
-            "/api/intelligence/synapse",
-            "/api/intelligence/fairshare-ai",
-        }
-        if request.url.path not in analysis_routes:
-            from fastapi.responses import JSONResponse
-            return JSONResponse(
-                status_code=403,
-                content={"detail": "This public judge demo is read-only. Data-changing actions are disabled."},
-            )
+async def protect_public_demo_writes(request: Request, call_next):
+    from fastapi.responses import JSONResponse
+    path = request.url.path
+    method = request.method
+    if method in {"GET", "HEAD", "OPTIONS"} or path in {"/api/demo/login", "/api/intelligence/synapse"}:
+        return await call_next(request)
+    if path == "/api/intelligence/fairshare-ai":
+        # Read-only analysis, but require an authenticated owner to prevent public Gemini abuse.
+        if _identity(request) == "Rahul Roy":
+            return await call_next(request)
+        return JSONResponse(status_code=403, content={"detail":"Owner access required for Gemini analysis"})
+    if not PUBLIC_DEMO_READ_ONLY:
+        # Fail closed even if Render's read-only setting is accidentally disabled.
+        return JSONResponse(status_code=503, content={"detail":"Interactive demo requires PUBLIC_DEMO_READ_ONLY=true"})
+    actor = _identity(request)
+    if actor is None:
+        return JSONResponse(status_code=401, content={"detail":"Sign in with a judge demo access code"})
+    owner = actor == "Rahul Roy"
+    parts = path.strip("/").split("/")
+    body = {}
+    if method in {"POST", "PATCH", "PUT"}:
+        try:
+            raw_body = await request.body()
+            body = json.loads(raw_body)
+            async def replay_body():
+                return {"type": "http.request", "body": raw_body, "more_body": False}
+            request._receive = replay_body
+            if not isinstance(body, dict):
+                body = {}
+        except Exception:
+            body = {}
+    allowed = False
+    with SessionLocal() as db:
+        if path == "/api/bookings" and method == "POST":
+            resource = db.get(Resource, str(body.get("resourceId", "")))
+            allowed = bool(resource and not owner and body.get("user") == actor and resource.owner != actor)
+        elif len(parts) >= 3 and parts[:2] == ["api", "bookings"]:
+            booking = db.get(Booking, parts[2])
+            if booking and booking.id not in DEMO_BOOKING_IDS:
+                is_owner = bool(db.get(Resource, booking.resourceId) and db.get(Resource, booking.resourceId).owner == actor)
+                is_requester = booking.user == actor
+                action = parts[3] if len(parts) > 3 else ""
+                allowed = ((method == "PATCH" and action == "status" and is_owner)
+                    or (method == "POST" and action in {"check-in", "return", "cancel", "extensions"} and is_requester))
+        elif len(parts) == 4 and parts[:3] == ["api", "sentinel", "bookings"] and method == "PUT":
+            booking = db.get(Booking, parts[3])
+            resource = db.get(Resource, booking.resourceId) if booking else None
+            allowed = bool(booking and resource and resource.owner == actor and booking.id not in DEMO_BOOKING_IDS and body.get("reviewer") in {actor, "Demo owner"})
+        elif len(parts) == 3 and parts[:2] == ["api", "extensions"] and method == "PATCH":
+            ext = db.get(ExtensionRequest, parts[2])
+            booking = db.get(Booking, ext.booking_id) if ext else None
+            resource = db.get(Resource, booking.resourceId) if booking else None
+            allowed = bool(resource and resource.owner == actor and booking.id not in DEMO_BOOKING_IDS)
+        elif len(parts) == 3 and parts[:2] == ["api", "incidents"] and method == "POST":
+            allowed = False
+        elif path == "/api/incidents" and method == "POST":
+            booking = db.get(Booking, str(body.get("bookingId", "")))
+            allowed = bool(booking and booking.user == actor and booking.id not in DEMO_BOOKING_IDS)
+        elif len(parts) == 4 and parts[:2] == ["api", "incidents"] and parts[3] == "status" and method == "PATCH":
+            incident = db.get(Incident, parts[2])
+            booking = db.get(Booking, incident.bookingId) if incident else None
+            resource = db.get(Resource, booking.resourceId) if booking else None
+            allowed = bool(resource and resource.owner == actor)
+        elif len(parts) == 4 and parts[:2] == ["api", "resources"] and parts[3] in {"availability", "rate"} and method == "PATCH":
+            resource = db.get(Resource, parts[2])
+            allowed = bool(resource and resource.owner == actor)
+        # New resource creation intentionally disabled for the public judge demo.
+    if not allowed:
+        return JSONResponse(status_code=403, content={"detail":"This action is not permitted for your demo identity"})
     return await call_next(request)
 
 

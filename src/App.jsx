@@ -62,6 +62,13 @@ import { Orbit, Search, ArrowRight, FlaskConical, CalendarDays, ShieldCheck, Cha
 
 
 
+
+const vyomraFetch = (url, options={}) => {
+  const token = sessionStorage.getItem('vyomra-judge-token');
+  const headers = {...(options.headers||{}), ...(token?{'Authorization':`Bearer ${token}`}:{})};
+  return fetch(url, {...options, headers});
+};
+
 const seedResources = [
 
 
@@ -374,7 +381,7 @@ function SynapsePanel({apiBase,onSelect}) {
 
     try {
 
-      const response = await fetch(`${apiBase}/api/intelligence/synapse`,{
+      const response = await vyomraFetch(`${apiBase}/api/intelligence/synapse`,{
 
         method:'POST',
 
@@ -564,7 +571,7 @@ function FairSharePanel({apiBase,resources}) {
     setLoading(true);setError('');setResult(null);
     try {
       const ai=nextMode==='ai';
-      const response=await fetch(ai?`${apiBase}/api/intelligence/fairshare-ai`:`${apiBase}/api/intelligence/fairshare?resource_id=${encodeURIComponent(id)}`,
+      const response=await vyomraFetch(ai?`${apiBase}/api/intelligence/fairshare-ai`:`${apiBase}/api/intelligence/fairshare?resource_id=${encodeURIComponent(id)}`,
         ai?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({resourceId:id})}:undefined);
       const data=await response.json();
       if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:'Could not load FairShare review');
@@ -626,8 +633,8 @@ function SentinelPanel({apiBase,bookings,onChanged}) {
   const [error,setError]=useState('');
   const [busy,setBusy]=useState(false);
   const eligible=bookings.filter(b=>!['Returned','Rejected','Waitlisted','Checked out'].includes(b.status)&&!['BK-582695','BK-278676','BK-694517'].includes(b.id));
-  useEffect(()=>{if(!bookingId){setReview(null);return;}let active=true;setError('');fetch(`${apiBase}/api/sentinel/bookings/${encodeURIComponent(bookingId)}`).then(async r=>{const d=await r.json();if(!r.ok)throw Error(d.detail||'Could not load');return d}).then(d=>{if(active){setReview(d);setChecks({trainingVerified:d.verified.training,approvalVerified:d.verified.approval,supervisionArranged:d.verified.supervision,conditionChecked:d.verified.condition,notes:d.notes||'',reviewer:d.reviewer||'Demo owner'});}}).catch(e=>{if(active)setError(e.message)});return()=>{active=false}},[bookingId,apiBase]);
-  const save=async()=>{setBusy(true);setError('');try{const r=await fetch(`${apiBase}/api/sentinel/bookings/${bookingId}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(checks)});const d=await r.json();if(!r.ok)throw Error(d.detail||'Could not save');setReview(d);onChanged?.();}catch(e){setError(e.message)}finally{setBusy(false)}};
+  useEffect(()=>{if(!bookingId){setReview(null);return;}let active=true;setError('');vyomraFetch(`${apiBase}/api/sentinel/bookings/${encodeURIComponent(bookingId)}`).then(async r=>{const d=await r.json();if(!r.ok)throw Error(d.detail||'Could not load');return d}).then(d=>{if(active){setReview(d);setChecks({trainingVerified:d.verified.training,approvalVerified:d.verified.approval,supervisionArranged:d.verified.supervision,conditionChecked:d.verified.condition,notes:d.notes||'',reviewer:d.reviewer||'Demo owner'});}}).catch(e=>{if(active)setError(e.message)});return()=>{active=false}},[bookingId,apiBase]);
+  const save=async()=>{setBusy(true);setError('');try{const r=await vyomraFetch(`${apiBase}/api/sentinel/bookings/${bookingId}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(checks)});const d=await r.json();if(!r.ok)throw Error(d.detail||'Could not save');setReview(d);onChanged?.();}catch(e){setError(e.message)}finally{setBusy(false)}};
   return <section className="v-module" aria-label="Sentinel safety intelligence">
     <div className="v-module-heading"><div><div className="eyebrow">VYOMRA INTELLIGENCE / 03</div><h2><ShieldCheck size={22}/> Sentinel Safety</h2><p>Verify mandatory access conditions before approving an ordinary booking. Owner attestations are not external credential verification.</p></div></div>
     <label>Choose a booking for safety review<select value={bookingId} onChange={e=>setBookingId(e.target.value)}><option value="">Select a booking</option>{eligible.map(b=><option key={b.id} value={b.id}>{b.id} · {b.resourceName} · {b.user}</option>)}</select></label>
@@ -639,13 +646,13 @@ function SentinelPanel({apiBase,bookings,onChanged}) {
 
 function ProofChainPanel({apiBase,bookings}) {
   const [id,setId]=useState('');const [data,setData]=useState(null);const [error,setError]=useState('');
-  useEffect(()=>{if(!id){setData(null);return;}let active=true;setError('');fetch(`${apiBase}/api/proofchain/bookings/${encodeURIComponent(id)}`).then(async r=>{const d=await r.json();if(!r.ok)throw Error(d.detail||'Could not load history');return d}).then(d=>{if(active)setData(d)}).catch(e=>{if(active)setError(e.message)});return()=>{active=false}},[id,apiBase]);
+  useEffect(()=>{if(!id){setData(null);return;}let active=true;setError('');vyomraFetch(`${apiBase}/api/proofchain/bookings/${encodeURIComponent(id)}`).then(async r=>{const d=await r.json();if(!r.ok)throw Error(d.detail||'Could not load history');return d}).then(d=>{if(active)setData(d)}).catch(e=>{if(active)setError(e.message)});return()=>{active=false}},[id,apiBase]);
   return <section className="v-module"><div className="v-module-heading"><div><div className="eyebrow">VYOMRA TRUST / 04</div><h2><ClipboardCheck size={22}/> ProofChain Ledger</h2><p>Server-recorded booking transitions, condition notes and incident events.</p></div></div><label>Inspect booking history<select value={id} onChange={e=>setId(e.target.value)}><option value="">Choose a booking</option>{bookings.map(b=><option key={b.id} value={b.id}>{b.id} · {b.resourceName} · {b.status}</option>)}</select></label>{error&&<p className="v-alert">{error}</p>}{data&&<><div className="v-timeline">{data.events.map((ev,i)=><div className="v-event" key={i}><span className="v-event-dot"/><div><strong>{ev.action}</strong><p>{ev.details}</p><small>{ev.actor} · {ev.occurredAt}</small></div></div>)}</div><p className="v-footnote">{data.note}</p></>}</section>
 }
 
 function ImpactDashboard({apiBase}) {
   const [data,setData]=useState(null);const [error,setError]=useState('');const [loading,setLoading]=useState(true);
-  const load=()=>{setLoading(true);setError('');fetch(`${apiBase}/api/impact/summary`).then(async r=>{const d=await r.json();if(!r.ok)throw Error(d.detail||'Could not load metrics');return d}).then(setData).catch(e=>setError(e.message)).finally(()=>setLoading(false))};
+  const load=()=>{setLoading(true);setError('');vyomraFetch(`${apiBase}/api/impact/summary`).then(async r=>{const d=await r.json();if(!r.ok)throw Error(d.detail||'Could not load metrics');return d}).then(setData).catch(e=>setError(e.message)).finally(()=>setLoading(false))};
   useEffect(()=>{load()},[apiBase]);
   return <section className="page-section wrap"><div className="eyebrow spaced">MEASURE WHAT MATTERS</div><div className="page-title-row"><div><h1>Idle-to-Impact</h1><p className="muted">Real counts and calculated booking hours from the connected database.</p></div><button className="button button-outline" onClick={load}>Refresh metrics</button></div>{loading&&<p>Loading live metrics…</p>}{error&&<p className="v-alert">{error}</p>}{data&&<><div className="v-metric-grid">{[['Resources listed',data.resourcesListed],['Requests submitted',data.totalRequests],['Pending review',data.pendingRequests],['Completed returns',data.completedReturns],['Completed usage hours',data.completedUsageHours],['Confirmed booked hours',data.confirmedBookedHours],['Open incidents',data.openIncidents],['Utilisation rate','Not measured']].map(([label,value])=><div className="v-metric" key={label}><small>{label}</small><strong>{value}</strong></div>)}</div><div className="v-module"><div className="v-module-heading"><div><h2>Usage by resource</h2><p>Completed hours count only bookings marked Returned; no fabricated capacity percentage.</p></div></div><div className="v-bars">{data.resourceBreakdown.map(r=><div className="v-bar-row" key={r.id}><div><strong>{r.name}</strong><small>{r.completedReturns} returns · {r.requests} requests</small></div><div className="v-bar-track"><span style={{width:`${data.completedUsageHours?Math.max(0,100*r.completedHours/data.completedUsageHours):0}%`}}/></div><b>{r.completedHours} h</b></div>)}</div></div><p className="v-footnote">{data.note}</p></>}</section>
 }
@@ -666,7 +673,7 @@ function LifecycleOperations({apiBase,bookings,onChanged,viewer,ownerMode=false}
   const load=async()=>{
     try {
       const paths=[`/api/extensions`,`/api/notifications?recipient=${encodeURIComponent(viewer||'You')}`,`/api/fair-use/summary`,`/api/overdue`];
-      const responses=await Promise.all(paths.map(x=>fetch(apiBase+x)));
+      const responses=await Promise.all(paths.map(x=>vyomraFetch(apiBase+x)));
       const data=await Promise.all(responses.map(async r=>{const d=await r.json();if(!r.ok)throw Error(d.detail||'Could not load operations');return d}));
       setExtensions(data[0]);setNotices(data[1]);setFairUse(data[2]);setOverdue(data[3]);
     }catch(e){setError(e.message)}
@@ -675,7 +682,7 @@ function LifecycleOperations({apiBase,bookings,onChanged,viewer,ownerMode=false}
   const send=async(path,method,payload)=>{
     setBusy(true);setError('');setMessage('');
     try {
-      const response=await fetch(apiBase+path,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      const response=await vyomraFetch(apiBase+path,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
       const data=await response.json();if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:'Request failed');
       setMessage('Saved successfully. ProofChain and booking status have been updated.');
       setReason('');await load();await onChanged?.();
@@ -753,7 +760,7 @@ function App(){
 
 
 
-  const response = await fetch(`${API_BASE}${path}`, {headers:{'Content-Type':'application/json'},...options});
+  const response = await vyomraFetch(`${API_BASE}${path}`, {headers:{'Content-Type':'application/json'},...options});
 
 
 
@@ -825,7 +832,7 @@ function App(){
 
 
 
-  fetch(`${API_BASE}/api/resources`),fetch(`${API_BASE}/api/bookings`),fetch(`${API_BASE}/api/incidents`)
+  vyomraFetch(`${API_BASE}/api/resources`),vyomraFetch(`${API_BASE}/api/bookings`),vyomraFetch(`${API_BASE}/api/incidents`)
 
 
 
@@ -849,7 +856,7 @@ function App(){
 
 
 
- .catch(()=>{if(live)setApiStatus('offline')});const timer=setInterval(()=>{Promise.all([fetch(`${API_BASE}/api/resources`),fetch(`${API_BASE}/api/bookings`),fetch(`${API_BASE}/api/incidents`)]).then(async rs=>{if(rs.some(r=>!r.ok))throw Error('API unavailable');return Promise.all(rs.map(r=>r.json()))}).then(([resources,bookings,incidents])=>{if(live){setDb({resources,bookings,incidents});setApiStatus('connected')}}).catch(()=>{if(live)setApiStatus('offline')})},12000);return()=>{live=false;clearInterval(timer)}},[API_BASE]);
+ .catch(()=>{if(live)setApiStatus('offline')});const timer=setInterval(()=>{Promise.all([vyomraFetch(`${API_BASE}/api/resources`),vyomraFetch(`${API_BASE}/api/bookings`),vyomraFetch(`${API_BASE}/api/incidents`)]).then(async rs=>{if(rs.some(r=>!r.ok))throw Error('API unavailable');return Promise.all(rs.map(r=>r.json()))}).then(([resources,bookings,incidents])=>{if(live){setDb({resources,bookings,incidents});setApiStatus('connected')}}).catch(()=>{if(live)setApiStatus('offline')})},12000);return()=>{live=false;clearInterval(timer)}},[API_BASE]);
 
 
 
@@ -1152,7 +1159,21 @@ useEffect(()=>{if(toast){const t=setTimeout(()=>setToast(''),3200);return()=>cle
   {fullName:'Researcher B',email:'researcher.b@vyomra-demo.example',phone:'Demo only',institution:'VYOMRA Demo Institution',department:'Chemical Engineering',designation:'Researcher',institutionId:'DEMO-RESEARCHER-B'},
   {fullName:'Researcher C',email:'researcher.c@vyomra-demo.example',phone:'Demo only',institution:'VYOMRA Demo Institution',department:'Chemical Engineering',designation:'Researcher',institutionId:'DEMO-RESEARCHER-C'},
  ];
- const enterDemo=(demo)=>{const next={...demo,demoAccount:true,truthfulnessAcceptedAt:null,truthfulnessVersion:'demo-v1'};localStorage.setItem('vyomra-profile-v1',JSON.stringify(next));setProfile(next);setRole('User');setPage('My activity');setToast(`Opened fictional demo profile: ${demo.fullName}. This is not secure authentication.`)};
+ const enterDemo=async(demo)=>{
+    const accessCode=window.prompt(`Enter the ${demo.fullName==='Rahul Roy'?'OWNER':'RESEARCHER'} demo access code:`);
+    if(!accessCode)return;
+    try {
+      const response=await fetch(`${API_BASE}/api/demo/login`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:demo.fullName,accessCode})});
+      const data=await response.json();
+      if(!response.ok)throw Error(data.detail||'Demo login failed');
+      sessionStorage.setItem('vyomra-judge-token',data.token);
+      const next={...demo,demoAccount:true,truthfulnessAcceptedAt:null,truthfulnessVersion:'judge-v2'};
+      localStorage.setItem('vyomra-profile-v1',JSON.stringify(next));setProfile(next);
+      setRole(demo.fullName==='Rahul Roy'?'Owner':'User');
+      setPage(demo.fullName==='Rahul Roy'?'Owner console':'My activity');
+      setToast(`Authenticated demo profile: ${demo.fullName}`);
+    }catch(error){setToast(error.message)}
+  };
  const submitAuth=(e)=>{e.preventDefault();if(authMode==='signup'){if(!authForm.truthful){setToast('Please accept the truthfulness declaration.');return}if(authForm.password.length<8){setToast('Use a password with at least 8 characters.');return}if(authForm.password!==authForm.confirmPassword){setToast('Passwords do not match.');return}const next={fullName:authForm.fullName.trim(),email:authForm.email.trim().toLowerCase(),phone:authForm.phone.trim(),institution:authForm.institution.trim(),department:authForm.department.trim(),designation:authForm.designation.trim(),institutionId:authForm.institutionId.trim(),truthfulnessAcceptedAt:new Date().toISOString(),truthfulnessVersion:'v1'};if(!next.fullName||!next.email||!next.phone||!next.institution||!next.department||!next.designation||!next.institutionId){setToast('Complete all required profile fields.');return}localStorage.setItem('vyomra-demo-account-email',next.email);setProfile(next);setToast('Demo profile created on this device. Email verification and secure server-side authentication are not enabled yet.');setPage('Home')}else{const saved=localStorage.getItem('vyomra-profile-v1');let p=null;try{p=JSON.parse(saved||'null')}catch{}if(!p||p.email!==authForm.email.trim().toLowerCase()){setToast('No matching demo profile found on this device. Create a profile first.');return}setProfile(p);setPage('Home');setToast('Demo profile opened. This is device-local access, not secure production login.')}};
 
 
@@ -1897,7 +1918,7 @@ useEffect(()=>{if(toast){const t=setTimeout(()=>setToast(''),3200);return()=>cle
 
 
 
- return <div className="app-shell"><header className="site-header"><div className="nav-wrap"><button className="brand" onClick={()=>go('Home')}><span className="brand-mark"><Orbit size={27}/></span><span><strong>VYOMRA</strong><small>RESOURCE INTELLIGENCE NETWORK</small></span></button><nav className="desktop-nav">{nav.map(n=><button className={page===n?'active':''} key={n} onClick={()=>go(n)}>{n}</button>)}</nav><div className="header-actions"><button className="icon-button" aria-label="Search resources" onClick={()=>go('Resources')}><Search size={19}/></button><button className="button button-outline sign-in" onClick={()=>{const nextRole=role==='User'?'Owner':'User';setRole(nextRole);setPage(nextRole==='Owner'?'Owner console':'Resources');setSelected(null);setModal('');setToast(nextRole==='Owner'?'Owner workspace opened. Manage your listings and incoming requests here.':'User workspace opened. Browse resources and track your bookings here.');window.scrollTo({top:0,behavior:'smooth'});}}>{role==='User'?'Switch to Owner':'Switch to User'}</button><button className="button button-outline sign-in" onClick={()=>{setProfile(null);setAuthMode('login');setAuthForm({fullName:'',email:'',phone:'',institution:'',department:'',designation:'',institutionId:'',password:'',confirmPassword:'',truthful:false});}}><LogOut size={15}/> Sign out</button><button className="button header-cta" onClick={()=>go('Resources')}>Get started</button><button className="mobile-menu" onClick={()=>setModal('menu')} aria-label="Open menu"><Menu/></button></div></div></header>
+ return <div className="app-shell"><header className="site-header"><div className="nav-wrap"><button className="brand" onClick={()=>go('Home')}><span className="brand-mark"><Orbit size={27}/></span><span><strong>VYOMRA</strong><small>RESOURCE INTELLIGENCE NETWORK</small></span></button><nav className="desktop-nav">{nav.map(n=><button className={page===n?'active':''} key={n} onClick={()=>go(n)}>{n}</button>)}</nav><div className="header-actions"><button className="icon-button" aria-label="Search resources" onClick={()=>go('Resources')}><Search size={19}/></button><button className="button button-outline sign-in" onClick={()=>{const nextRole=role==='User'?'Owner':'User';setRole(nextRole);setPage(nextRole==='Owner'?'Owner console':'Resources');setSelected(null);setModal('');setToast(nextRole==='Owner'?'Owner workspace opened. Manage your listings and incoming requests here.':'User workspace opened. Browse resources and track your bookings here.');window.scrollTo({top:0,behavior:'smooth'});}}>{role==='User'?'Switch to Owner':'Switch to User'}</button><button className="button button-outline sign-in" onClick={()=>{sessionStorage.removeItem('vyomra-judge-token');setProfile(null);setAuthMode('login');setAuthForm({fullName:'',email:'',phone:'',institution:'',department:'',designation:'',institutionId:'',password:'',confirmPassword:'',truthful:false});}}><LogOut size={15}/> Sign out</button><button className="button header-cta" onClick={()=>go('Resources')}>Get started</button><button className="mobile-menu" onClick={()=>setModal('menu')} aria-label="Open menu"><Menu/></button></div></div></header>
 
 
 
